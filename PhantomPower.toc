@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: PhantomPower
+## Notes: Paladin blessing, aura, seal, and Righteous Fury manager for World of Warcraft: Forever.
+## Author: Matthew + ChatGPT
+## Version: 0.1.1
+## SavedVariables: PhantomPowerDB
+
+Core.lua
