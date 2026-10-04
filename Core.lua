@@ -3,11 +3,17 @@ local ADDON_NAME, ns = ...
 local PP = CreateFrame("Frame")
 ns.PP = PP
 
-local VERSION = "0.2.0"
+local VERSION = "0.3.0"
 local PROTOCOL_VERSION = "1"
 local COMM_PREFIX = "PhantomPower"
 local PREFIX = "|cffffd200PhantomPower|r: "
 local MAX_PALADIN_ROWS = 12
+
+local ICON_SIZES = {
+    SMALL = 14,
+    MEDIUM = 18,
+    LARGE = 22,
+}
 
 local CLASS_ORDER = {
     "WARRIOR",
@@ -89,6 +95,7 @@ local defaults = {
     y = 0,
     aura = "DEVOTION",
     seal = "RIGHTEOUSNESS",
+    iconSize = "MEDIUM",
     classBlessings = {},
 }
 for _, classToken in ipairs(CLASS_ORDER) do
@@ -141,6 +148,80 @@ local function SpellName(spellID, fallback)
     return fallback
 end
 
+local function SpellTexture(spellID)
+    if C_Spell and type(C_Spell.GetSpellTexture) == "function" then
+        local ok, texture = pcall(C_Spell.GetSpellTexture, spellID)
+        if ok and texture and not IsSecret(texture) then
+            return texture
+        end
+    end
+
+    local info = SafeSpellInfo(spellID)
+    if info and info.iconID and not IsSecret(info.iconID) then
+        return info.iconID
+    end
+
+    if type(GetSpellTexture) == "function" then
+        local ok, texture = pcall(GetSpellTexture, spellID)
+        if ok and texture and not IsSecret(texture) then
+            return texture
+        end
+    end
+
+    return nil
+end
+
+local function CurrentIconSize()
+    local key = PhantomPowerDB and PhantomPowerDB.iconSize or defaults.iconSize
+    return ICON_SIZES[key] or ICON_SIZES.MEDIUM
+end
+
+local function EnsureAssignmentIcon(button)
+    if button.assignmentIcon then return button.assignmentIcon end
+    local icon = button:CreateTexture(nil, "ARTWORK")
+    icon:SetPoint("CENTER", button, "CENTER", 0, 0)
+    icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    button.assignmentIcon = icon
+    return icon
+end
+
+local function SetAssignmentIcon(button, entry, hasData)
+    local icon = EnsureAssignmentIcon(button)
+    local iconSize = CurrentIconSize()
+    icon:SetSize(iconSize, iconSize)
+
+    if not hasData then
+        icon:Hide()
+        button:SetText("?")
+        button:SetAlpha(0.8)
+        return
+    end
+
+    button:SetText("")
+    if not entry or entry.key == "NONE" then
+        icon:Hide()
+        button:SetAlpha(0.48)
+        return
+    end
+
+    local texture = SpellTexture(entry.spellID)
+    if texture then
+        icon:SetTexture(texture)
+        icon:Show()
+        button:SetAlpha(1.0)
+    else
+        icon:Hide()
+        button:SetText(entry.short or "?")
+        button:SetAlpha(1.0)
+    end
+end
+
+local function EntryFullName(entry)
+    if not entry then return "No synchronized data" end
+    if entry.key == "NONE" then return "None" end
+    return SpellName(entry.spellID, entry.fallback or entry.label or entry.key)
+end
+
 local function ClassDisplayName(classToken)
     if LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[classToken] then
         return LOCALIZED_CLASS_NAMES_MALE[classToken]
@@ -163,6 +244,10 @@ local function CopyDefaults()
     end
     if not PhantomPowerDB.seal or not sealByKey[PhantomPowerDB.seal] then
         PhantomPowerDB.seal = defaults.seal
+    end
+    PhantomPowerDB.iconSize = string.upper(tostring(PhantomPowerDB.iconSize or defaults.iconSize))
+    if not ICON_SIZES[PhantomPowerDB.iconSize] then
+        PhantomPowerDB.iconSize = defaults.iconSize
     end
 
     for _, classToken in ipairs(CLASS_ORDER) do
@@ -565,14 +650,20 @@ local function UpdateMatrix()
                 cell.isSelf = entry.isSelf and IsPaladin()
                 local blessingKey = state and state.assignments and state.assignments[classToken] or nil
                 local blessing = blessingKey and blessingByKey[blessingKey] or nil
-                cell:SetText(blessing and blessing.short or "?")
+                cell.currentEntry = blessing
+                cell.hasData = state ~= nil
+                SetAssignmentIcon(cell, blessing, state ~= nil)
                 cell:SetEnabled(cell.isSelf and not (InCombatLockdown and InCombatLockdown()))
             end
 
             local aura = state and auraByKey[state.aura] or nil
             local seal = state and sealByKey[state.seal] or nil
-            row.aura:SetText(aura and aura.short or "?")
-            row.seal:SetText(seal and seal.short or "?")
+            row.aura.currentEntry = aura
+            row.seal.currentEntry = seal
+            row.aura.hasData = state ~= nil
+            row.seal.hasData = state ~= nil
+            SetAssignmentIcon(row.aura, aura, state ~= nil)
+            SetAssignmentIcon(row.seal, seal, state ~= nil)
             row.aura.isSelf = entry.isSelf and IsPaladin()
             row.seal.isSelf = entry.isSelf and IsPaladin()
             row.aura:SetEnabled(row.aura.isSelf and not (InCombatLockdown and InCombatLockdown()))
@@ -664,25 +755,35 @@ local function CreateMatrixRow(parent, index, topY)
         cell:SetSize(48, 24)
         cell:SetPoint("LEFT", x, 0)
         cell:SetText("?")
-        cell:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        cell:SetScript("OnClick", function(self, mouseButton)
+        EnsureAssignmentIcon(cell)
+        cell:RegisterForClicks("LeftButtonUp")
+        cell:SetScript("OnClick", function(self)
             if not self.isSelf then return end
             if InCombatLockdown and InCombatLockdown() then
                 Print("Blessing assignments are locked in combat.")
                 return
             end
-            local direction = mouseButton == "RightButton" and -1 or 1
             local oldKey = PhantomPowerDB.classBlessings[thisClass] or "NONE"
-            PhantomPowerDB.classBlessings[thisClass] = CycleEntry(BLESSINGS, oldKey, direction)
+            PhantomPowerDB.classBlessings[thisClass] = CycleEntry(BLESSINGS, oldKey, 1)
             OnLocalAssignmentChanged()
         end)
         ShowTooltip(cell,
-            function() return ClassDisplayName(thisClass) .. " assignment" end,
             function()
-                if cell.isSelf then
-                    return "Left-click / right-click to cycle your assigned blessing. Changes are synchronized to the party or raid."
+                if not cell.hasData then
+                    return ClassDisplayName(thisClass) .. ": No synchronized data"
                 end
-                return "This is the blessing assigned to this Paladin for " .. ClassDisplayName(thisClass) .. "."
+                return EntryFullName(cell.currentEntry)
+            end,
+            function()
+                local className = ClassDisplayName(thisClass)
+                if not cell.hasData then
+                    return "No PhantomPower assignment has been received for this Paladin."
+                elseif cell.isSelf then
+                    return className .. " assignment. Left-click to cycle to the next blessing."
+                elseif cell.currentEntry and cell.currentEntry.key ~= "NONE" then
+                    return "Assigned to this Paladin for " .. className .. "."
+                end
+                return "No blessing assigned to this Paladin for " .. className .. "."
             end
         )
         row.cells[thisClass] = cell
@@ -693,37 +794,63 @@ local function CreateMatrixRow(parent, index, topY)
     row.aura:SetSize(48, 24)
     row.aura:SetPoint("LEFT", x + 2, 0)
     row.aura:SetText("?")
-    row.aura:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    row.aura:SetScript("OnClick", function(self, mouseButton)
+    EnsureAssignmentIcon(row.aura)
+    row.aura:RegisterForClicks("LeftButtonUp")
+    row.aura:SetScript("OnClick", function(self)
         if not self.isSelf then return end
         if InCombatLockdown and InCombatLockdown() then
             Print("Aura assignment is locked in combat.")
             return
         end
-        local direction = mouseButton == "RightButton" and -1 or 1
-        PhantomPowerDB.aura = CycleEntry(AURAS, PhantomPowerDB.aura, direction)
+        PhantomPowerDB.aura = CycleEntry(AURAS, PhantomPowerDB.aura, 1)
         ApplyUtilityButtons()
         OnLocalAssignmentChanged()
     end)
-    ShowTooltip(row.aura, "Aura assignment", "Your selected aura. Click your own row to cycle it; other rows are view-only.")
+    ShowTooltip(row.aura,
+        function()
+            if not row.aura.hasData then return "Aura: No synchronized data" end
+            return EntryFullName(row.aura.currentEntry)
+        end,
+        function()
+            if not row.aura.hasData then
+                return "No PhantomPower aura assignment has been received for this Paladin."
+            elseif row.aura.isSelf then
+                return "Aura assignment. Left-click to cycle to the next aura."
+            end
+            return "This Paladin's assigned aura."
+        end
+    )
 
     row.seal = CreateFrame("Button", nil, row.frame, "UIPanelButtonTemplate")
     row.seal:SetSize(48, 24)
     row.seal:SetPoint("LEFT", x + 52, 0)
     row.seal:SetText("?")
-    row.seal:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    row.seal:SetScript("OnClick", function(self, mouseButton)
+    EnsureAssignmentIcon(row.seal)
+    row.seal:RegisterForClicks("LeftButtonUp")
+    row.seal:SetScript("OnClick", function(self)
         if not self.isSelf then return end
         if InCombatLockdown and InCombatLockdown() then
             Print("Seal assignment is locked in combat.")
             return
         end
-        local direction = mouseButton == "RightButton" and -1 or 1
-        PhantomPowerDB.seal = CycleEntry(SEALS, PhantomPowerDB.seal, direction)
+        PhantomPowerDB.seal = CycleEntry(SEALS, PhantomPowerDB.seal, 1)
         ApplyUtilityButtons()
         OnLocalAssignmentChanged()
     end)
-    ShowTooltip(row.seal, "Seal assignment", "Your selected seal. Click your own row to cycle it; other rows are view-only.")
+    ShowTooltip(row.seal,
+        function()
+            if not row.seal.hasData then return "Seal: No synchronized data" end
+            return EntryFullName(row.seal.currentEntry)
+        end,
+        function()
+            if not row.seal.hasData then
+                return "No PhantomPower seal assignment has been received for this Paladin."
+            elseif row.seal.isSelf then
+                return "Seal assignment. Left-click to cycle to the next seal."
+            end
+            return "This Paladin's assigned seal."
+        end
+    )
 
     row.frame:Hide()
     return row
@@ -961,6 +1088,7 @@ local function ResetDB()
     PhantomPowerDB.y = defaults.y
     PhantomPowerDB.aura = defaults.aura
     PhantomPowerDB.seal = defaults.seal
+    PhantomPowerDB.iconSize = defaults.iconSize
     for _, classToken in ipairs(CLASS_ORDER) do
         PhantomPowerDB.classBlessings[classToken] = defaults.classBlessings[classToken]
     end
@@ -980,6 +1108,7 @@ local function Diagnostics()
     Print("Client: " .. tostring(version) .. " build " .. tostring(build) .. " TOC " .. tostring(toc) .. " (" .. tostring(date) .. ")")
     Print("C_ChatInfo: " .. tostring(C_ChatInfo ~= nil) .. ", prefix registered: " .. tostring(C_ChatInfo and C_ChatInfo.IsAddonMessagePrefixRegistered and C_ChatInfo.IsAddonMessagePrefixRegistered(COMM_PREFIX)))
     Print("Group channel: " .. tostring(GetGroupChannel()) .. ", Paladin: " .. tostring(IsPaladin()))
+    Print("Assignment icon size: " .. tostring(PhantomPowerDB and PhantomPowerDB.iconSize))
     Print("Known remote Paladin states: " .. tostring((function() local n = 0 for _ in pairs(remotePaladins) do n = n + 1 end return n end)()))
 end
 
@@ -1049,8 +1178,15 @@ SlashCmdList.PHANTOMPOWER = function(msg)
         Print("Assignment sync requested.")
     elseif msg == "diag" then
         Diagnostics()
+    elseif msg == "icons" then
+        Print("Assignment icon size is " .. string.lower(PhantomPowerDB.iconSize or defaults.iconSize) .. ". Use /pp icons small, /pp icons medium, or /pp icons large.")
+    elseif msg == "icons small" or msg == "icons medium" or msg == "icons large" then
+        local size = string.upper(msg:match("icons%s+(%a+)") or "MEDIUM")
+        PhantomPowerDB.iconSize = ICON_SIZES[size] and size or defaults.iconSize
+        RefreshLayout()
+        Print("Assignment icon size set to " .. string.lower(PhantomPowerDB.iconSize) .. ".")
     else
-        Print("Commands: /pp, /pp sync, /pp reset, /pp scan, /pp diag")
+        Print("Commands: /pp, /pp sync, /pp reset, /pp scan, /pp icons small|medium|large, /pp diag")
     end
 end
 
